@@ -296,13 +296,14 @@ class LCDDevice:
 
     # --- USB Reset / Recovery ---
 
-    def _find_sysfs_path(self):
-        """Dynamically discover the sysfs path for the LCD USB device.
+    def _find_sysfs_path(self, vid=None, pid=None):
+        """Dynamically discover the sysfs path for a USB device by VID:PID.
 
-        Scans /sys/bus/usb/devices/*/idVendor and idProduct to find
-        the device matching LCD_VID:LCD_PID (1cbe:a088).
+        Scans /sys/bus/usb/devices/*/idVendor and idProduct.
         Returns the device path (e.g. '1-12.2') or None.
         """
+        target_vid = vid if vid is not None else LCD_VID
+        target_pid = pid if pid is not None else LCD_PID
         base = Path('/sys/bus/usb/devices')
         if not base.exists():
             return None
@@ -312,60 +313,82 @@ class LCDDevice:
             if not vendor_file.exists() or not product_file.exists():
                 continue
             try:
-                vid = int(vendor_file.read_text().strip(), 16)
-                pid = int(product_file.read_text().strip(), 16)
-                if vid == LCD_VID and pid == LCD_PID:
+                dev_vid = int(vendor_file.read_text().strip(), 16)
+                dev_pid = int(product_file.read_text().strip(), 16)
+                if dev_vid == target_vid and dev_pid == target_pid:
                     return dev_dir.name
             except (ValueError, OSError):
                 continue
         return None
 
-    def usb_reset(self):
-        """Power-cycle the USB device via sysfs authorized flag.
+    @staticmethod
+    def _get_parent_path(device_path):
+        """Get the parent hub path from a device sysfs path.
+
+        '1-12.2'   -> '1-12'
+        '1-12.3.1' -> '1-12.3'
+        '1-12'     -> None  (root hub, no parent in this namespace)
+        """
+        if '.' not in device_path:
+            return None
+        return device_path.rsplit('.', 1)[0]
+
+    def _reset_sysfs_path(self, path, label="device"):
+        """Power-cycle a USB device via sysfs authorized flag.
 
         Writes 0 then 1 to /sys/bus/usb/devices/<path>/authorized.
-        This forces the kernel to disconnect and re-enumerate the device,
-        which is the most reliable way to recover after sleep/hibernate.
+        Returns True if the reset command was written successfully.
         """
-        path = self._find_sysfs_path()
-        if path is None:
-            print("[usb_reset] Device not found in sysfs")
-            return False
-
         authorized = Path(f'/sys/bus/usb/devices/{path}/authorized')
         if not authorized.exists():
-            print(f"[usb_reset] authorized file missing for {path}")
+            print(f"[usb_reset] {label}: authorized file missing for {path}")
             return False
 
-        print(f"[usb_reset] Resetting USB device at {path}...")
+        print(f"[usb_reset] {label}: resetting {path}...")
         try:
             authorized.write_text('0')
             time.sleep(1.5)
             authorized.write_text('1')
+            return True
         except PermissionError:
-            print(f"[usb_reset] Permission denied. Run with sudo.")
+            print(f"[usb_reset] {label}: Permission denied. Run with sudo.")
             return False
         except OSError as e:
-            print(f"[usb_reset] Error writing sysfs: {e}")
+            print(f"[usb_reset] {label}: Error writing sysfs: {e}")
             return False
 
-        # Wait for re-enumeration
-        for attempt in range(30):
+    def _wait_for_device(self, timeout_sec=15, vid=None, pid=None):
+        """Poll until the USB device re-appears via pyusb."""
+        target_vid = vid if vid is not None else LCD_VID
+        target_pid = pid if pid is not None else LCD_PID
+        for attempt in range(int(timeout_sec * 2)):
             time.sleep(0.5)
-            if usb.core.find(idVendor=LCD_VID, idProduct=LCD_PID):
-                print(f"[usb_reset] Device re-enumerated after {(attempt + 1) * 0.5:.1f}s")
+            if usb.core.find(idVendor=target_vid, idProduct=target_pid):
+                print(f"[usb_reset] Device {target_vid:04x}:{target_pid:04x} "
+                      f"re-enumerated after {(attempt + 1) * 0.5:.1f}s")
                 return True
-        print("[usb_reset] Device did not re-enumerate")
         return False
 
     def hard_reset(self):
-        """Aggressive device reset: tries usbreset binary, falls back to sysfs.
+        """Aggressive device reset after sleep/hibernate.
 
-        This is the 'nuclear option' when the device is completely unresponsive
-        after sleep. It handles both monitor mode (1cbe:a088) and the case
-        where the device has fallen back to desktop/standby mode.
+        This is the 'nuclear option' when the LCD is completely unresponsive.
+        It handles all post-sleep states:
+          - Monitor mode (1cbe:a088) frozen
+          - Desktop/standby mode (1a86:ad21)
+          - Device disappeared from bus entirely
+
+        Strategy:
+          1. Try usbreset binary on monitor mode
+          2. Search sysfs for monitor mode and reset
+          3. If not found, search sysfs for desktop mode and reset
+          4. Wait for monitor mode to re-appear
+          5. If still missing, reset the parent USB hub
+          6. Wait again (device may need a moment to boot)
         """
-        # Try usbreset binary if available (from usbutils or standalone)
+        print("[hard_reset] Starting aggressive USB recovery...")
+
+        # --- Step 1: usbreset binary on monitor mode ---
         try:
             result = subprocess.run(
                 ['usbreset', f'{LCD_VID:04x}:{LCD_PID:04x}'],
@@ -374,12 +397,52 @@ class LCDDevice:
             if result.returncode == 0:
                 print("[hard_reset] usbreset succeeded")
                 time.sleep(2)
-                return True
+                return self._wait_for_device(timeout_sec=10)
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
+        print("[hard_reset] usbreset not available or failed")
 
-        # Fall back to sysfs power-cycle
-        return self.usb_reset()
+        # --- Step 2: sysfs reset of monitor mode device ---
+        monitor_path = self._find_sysfs_path(LCD_VID, LCD_PID)
+        if monitor_path:
+            if self._reset_sysfs_path(monitor_path, "monitor"):
+                if self._wait_for_device(timeout_sec=12):
+                    return True
+            print("[hard_reset] Monitor reset did not bring device back")
+
+        # --- Step 3: sysfs reset of desktop mode device ---
+        desktop_path = self._find_sysfs_path(HID_VID, HID_PID)
+        if desktop_path:
+            print(f"[hard_reset] Found desktop mode at {desktop_path}")
+            if self._reset_sysfs_path(desktop_path, "desktop"):
+                if self._wait_for_device(timeout_sec=12):
+                    return True
+            print("[hard_reset] Desktop reset did not bring device back")
+
+        # --- Step 4: reset parent hub of whichever device we found ---
+        # Prefer monitor parent, fall back to desktop parent
+        target_path = monitor_path or desktop_path
+        if target_path:
+            parent = self._get_parent_path(target_path)
+            if parent:
+                print(f"[hard_reset] Trying parent hub reset: {parent} "
+                      "(may briefly disconnect other devices on this hub)")
+                if self._reset_sysfs_path(parent, "parent_hub"):
+                    if self._wait_for_device(timeout_sec=15):
+                        return True
+                print("[hard_reset] Parent hub reset did not bring device back")
+
+        # --- Step 5: last-ditch attempt: scan every hub and reset the one
+        # that has the most child devices matching our bus (heuristic) ---
+        print("[hard_reset] All targeted resets failed. Waiting 5s and retrying scan...")
+        time.sleep(5)
+
+        # Sometimes the device just needs more time to boot after a reset
+        if self._wait_for_device(timeout_sec=10):
+            return True
+
+        print("[hard_reset] Recovery failed — device did not re-enumerate")
+        return False
 
     def health_check(self):
         """Verify the device is actually responsive.

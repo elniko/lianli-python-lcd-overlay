@@ -110,7 +110,7 @@ class LCDStreamer:
                 self._fail_count = 0
             except Exception as e:
                 self._fail_count += 1
-                print(f"[stream] Overlay error ({self._fail_count}/3): {e}")
+                print(f"[stream] Overlay error ({self._fail_count}/3): {type(e).__name__}: {e}")
                 if self._fail_count >= 3:
                     print("[stream] Too many failures, initiating recovery...")
                     if not self._recover():
@@ -148,20 +148,22 @@ class LCDStreamer:
         self._consecutive_recoveries += 1
         backoff = min(self._consecutive_recoveries * 2, 10)
         print(f"[recover] Attempt {self._consecutive_recoveries} (backoff {backoff}s)...")
+        if backoff > 0:
+            time.sleep(backoff)
         
         # 1. Stop playback
         try:
             if self.lcd:
                 self.lcd.stop_play()
         except Exception as e:
-            print(f"[recover] stop_play failed (expected): {e}")
+            print(f"[recover] stop_play failed (expected): {type(e).__name__}: {e}")
         
         # 2. Close handle
         try:
             if self.lcd:
                 self.lcd.close()
         except Exception as e:
-            print(f"[recover] close failed (expected): {e}")
+            print(f"[recover] close failed (expected): {type(e).__name__}: {e}")
         
         time.sleep(1)
         
@@ -169,7 +171,7 @@ class LCDStreamer:
         try:
             reset_ok = self.lcd.hard_reset()
         except Exception as e:
-            print(f"[recover] hard_reset failed: {e}")
+            print(f"[recover] hard_reset failed: {type(e).__name__}: {e}")
             reset_ok = False
         
         if not reset_ok:
@@ -179,7 +181,7 @@ class LCDStreamer:
             try:
                 reset_ok = self.lcd.hard_reset()
             except Exception as e:
-                print(f"[recover] Second reset attempt failed: {e}")
+                print(f"[recover] Second reset attempt failed: {type(e).__name__}: {e}")
         
         if not reset_ok:
             print("[recover] Could not reset USB device")
@@ -189,19 +191,26 @@ class LCDStreamer:
         time.sleep(1)
         try:
             if not self.lcd.connect():
-                print("[recover] Reconnect failed")
-                return False
+                print("[recover] Reconnect failed — device may be in desktop mode")
+                # One last attempt: if connect() found the device in desktop mode,
+                # wake_from_desktop() was already called inside connect().
+                # Give it a few more seconds for re-enumeration.
+                time.sleep(5)
+                if not self.lcd.connect():
+                    print("[recover] Reconnect failed after second attempt")
+                    return False
         except Exception as e:
-            print(f"[recover] Connect error: {e}")
+            print(f"[recover] Connect error: {type(e).__name__}: {e}")
             return False
         
         # 5. Reinitialize
+        time.sleep(0.5)
         try:
             self.lcd.init()
             self.lcd.prepare_display()
             self.lcd.check_h264_block()
         except Exception as e:
-            print(f"[recover] Re-init error: {e}")
+            print(f"[recover] Re-init error: {type(e).__name__}: {e}")
             return False
         
         # 6. Restart video if needed
