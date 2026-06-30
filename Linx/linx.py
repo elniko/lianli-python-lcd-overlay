@@ -294,6 +294,108 @@ class LCDDevice:
         usb.util.claim_interface(self.dev, 0)
         return True
 
+    # --- USB Reset / Recovery ---
+
+    def _find_sysfs_path(self):
+        """Dynamically discover the sysfs path for the LCD USB device.
+
+        Scans /sys/bus/usb/devices/*/idVendor and idProduct to find
+        the device matching LCD_VID:LCD_PID (1cbe:a088).
+        Returns the device path (e.g. '1-12.2') or None.
+        """
+        base = Path('/sys/bus/usb/devices')
+        if not base.exists():
+            return None
+        for dev_dir in base.iterdir():
+            vendor_file = dev_dir / 'idVendor'
+            product_file = dev_dir / 'idProduct'
+            if not vendor_file.exists() or not product_file.exists():
+                continue
+            try:
+                vid = int(vendor_file.read_text().strip(), 16)
+                pid = int(product_file.read_text().strip(), 16)
+                if vid == LCD_VID and pid == LCD_PID:
+                    return dev_dir.name
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def usb_reset(self):
+        """Power-cycle the USB device via sysfs authorized flag.
+
+        Writes 0 then 1 to /sys/bus/usb/devices/<path>/authorized.
+        This forces the kernel to disconnect and re-enumerate the device,
+        which is the most reliable way to recover after sleep/hibernate.
+        """
+        path = self._find_sysfs_path()
+        if path is None:
+            print("[usb_reset] Device not found in sysfs")
+            return False
+
+        authorized = Path(f'/sys/bus/usb/devices/{path}/authorized')
+        if not authorized.exists():
+            print(f"[usb_reset] authorized file missing for {path}")
+            return False
+
+        print(f"[usb_reset] Resetting USB device at {path}...")
+        try:
+            authorized.write_text('0')
+            time.sleep(1.5)
+            authorized.write_text('1')
+        except PermissionError:
+            print(f"[usb_reset] Permission denied. Run with sudo.")
+            return False
+        except OSError as e:
+            print(f"[usb_reset] Error writing sysfs: {e}")
+            return False
+
+        # Wait for re-enumeration
+        for attempt in range(30):
+            time.sleep(0.5)
+            if usb.core.find(idVendor=LCD_VID, idProduct=LCD_PID):
+                print(f"[usb_reset] Device re-enumerated after {(attempt + 1) * 0.5:.1f}s")
+                return True
+        print("[usb_reset] Device did not re-enumerate")
+        return False
+
+    def hard_reset(self):
+        """Aggressive device reset: tries usbreset binary, falls back to sysfs.
+
+        This is the 'nuclear option' when the device is completely unresponsive
+        after sleep. It handles both monitor mode (1cbe:a088) and the case
+        where the device has fallen back to desktop/standby mode.
+        """
+        # Try usbreset binary if available (from usbutils or standalone)
+        try:
+            result = subprocess.run(
+                ['usbreset', f'{LCD_VID:04x}:{LCD_PID:04x}'],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                print("[hard_reset] usbreset succeeded")
+                time.sleep(2)
+                return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+        # Fall back to sysfs power-cycle
+        return self.usb_reset()
+
+    def health_check(self):
+        """Verify the device is actually responsive.
+
+        Sends a lightweight command (get_version). Returns True if the device
+        replies within timeout. This catches 'silent' disconnects where the
+        USB handle is still open but the device ignores data.
+        """
+        if self.dev is None:
+            return False
+        try:
+            resp = self.send_cmd(CMD_GET_VER)
+            return resp is not None and len(resp) > 8
+        except (usb.core.USBError, ValueError):
+            return False
+
     # --- Low-level I/O ---
 
     def _flush_read(self):
