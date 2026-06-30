@@ -22,6 +22,7 @@ import io
 import argparse
 import random
 import threading
+from pathlib import Path
 from Crypto.Cipher import DES
 import usb.core
 import usb.util
