@@ -235,6 +235,7 @@ class LCDDevice:
     def __init__(self):
         self.dev = None
         self.h264_buf_len = 202752  # Default; queried from device before streaming
+        self.sysfs_path = None     # Discovered sysfs path, e.g. '1-12.2'
 
     # --- Connection ---
 
@@ -259,7 +260,22 @@ class LCDDevice:
             print(f"Connected: {self.dev.manufacturer} {self.dev.product}")
         except (ValueError, usb.core.USBError):
             print(f"Connected: {LCD_VID:04x}:{LCD_PID:04x}")
+        # Save sysfs path for future hard resets
+        self._save_sysfs_path()
         return True
+
+    def _save_sysfs_path(self):
+        """Cache the sysfs path after a successful connection."""
+        path = self._find_sysfs_path(LCD_VID, LCD_PID)
+        if path:
+            self.sysfs_path = path
+            print(f"[sysfs] Cached device path: {path}")
+        else:
+            # Fallback: try desktop mode path
+            path = self._find_sysfs_path(HID_VID, HID_PID)
+            if path:
+                self.sysfs_path = path
+                print(f"[sysfs] Cached desktop path: {path}")
 
     def close(self):
         """Release the USB interface."""
@@ -379,16 +395,25 @@ class LCDDevice:
           - Device disappeared from bus entirely
 
         Strategy:
-          1. Try usbreset binary on monitor mode
-          2. Search sysfs for monitor mode and reset
-          3. If not found, search sysfs for desktop mode and reset
-          4. Wait for monitor mode to re-appear
-          5. If still missing, reset the parent USB hub
-          6. Wait again (device may need a moment to boot)
+          1. Use cached sysfs path if available (fastest, most reliable)
+          2. Try usbreset binary on monitor mode
+          3. Search sysfs for monitor mode and reset
+          4. If not found, search sysfs for desktop mode and reset
+          5. Wait for monitor mode to re-appear
+          6. If still missing, reset the parent USB hub
+          7. Wait again (device may need a moment to boot)
         """
         print("[hard_reset] Starting aggressive USB recovery...")
 
-        # --- Step 1: usbreset binary on monitor mode ---
+        # --- Step 1: use cached sysfs path ---
+        if self.sysfs_path:
+            print(f"[hard_reset] Using cached sysfs path: {self.sysfs_path}")
+            if self._reset_sysfs_path(self.sysfs_path, "cached"):
+                if self._wait_for_device(timeout_sec=15):
+                    return True
+            print("[hard_reset] Cached path reset did not bring device back")
+
+        # --- Step 2: usbreset binary on monitor mode ---
         try:
             result = subprocess.run(
                 ['usbreset', f'{LCD_VID:04x}:{LCD_PID:04x}'],
@@ -402,43 +427,40 @@ class LCDDevice:
             pass
         print("[hard_reset] usbreset not available or failed")
 
-        # --- Step 2: sysfs reset of monitor mode device ---
+        # --- Step 3: sysfs reset of monitor mode device ---
         monitor_path = self._find_sysfs_path(LCD_VID, LCD_PID)
         if monitor_path:
             if self._reset_sysfs_path(monitor_path, "monitor"):
-                if self._wait_for_device(timeout_sec=12):
+                if self._wait_for_device(timeout_sec=15):
                     return True
             print("[hard_reset] Monitor reset did not bring device back")
 
-        # --- Step 3: sysfs reset of desktop mode device ---
+        # --- Step 4: sysfs reset of desktop mode device ---
         desktop_path = self._find_sysfs_path(HID_VID, HID_PID)
         if desktop_path:
             print(f"[hard_reset] Found desktop mode at {desktop_path}")
             if self._reset_sysfs_path(desktop_path, "desktop"):
-                if self._wait_for_device(timeout_sec=12):
+                if self._wait_for_device(timeout_sec=15):
                     return True
             print("[hard_reset] Desktop reset did not bring device back")
 
-        # --- Step 4: reset parent hub of whichever device we found ---
-        # Prefer monitor parent, fall back to desktop parent
-        target_path = monitor_path or desktop_path
+        # --- Step 5: reset parent hub of whichever device we found ---
+        target_path = monitor_path or desktop_path or self.sysfs_path
         if target_path:
             parent = self._get_parent_path(target_path)
             if parent:
                 print(f"[hard_reset] Trying parent hub reset: {parent} "
                       "(may briefly disconnect other devices on this hub)")
                 if self._reset_sysfs_path(parent, "parent_hub"):
-                    if self._wait_for_device(timeout_sec=15):
+                    if self._wait_for_device(timeout_sec=20):
                         return True
                 print("[hard_reset] Parent hub reset did not bring device back")
 
-        # --- Step 5: last-ditch attempt: scan every hub and reset the one
-        # that has the most child devices matching our bus (heuristic) ---
-        print("[hard_reset] All targeted resets failed. Waiting 5s and retrying scan...")
-        time.sleep(5)
+        # --- Step 6: last-ditch attempt ---
+        print("[hard_reset] All targeted resets failed. Waiting 10s and retrying scan...")
+        time.sleep(10)
 
-        # Sometimes the device just needs more time to boot after a reset
-        if self._wait_for_device(timeout_sec=10):
+        if self._wait_for_device(timeout_sec=15):
             return True
 
         print("[hard_reset] Recovery failed — device did not re-enumerate")
