@@ -1,0 +1,80 @@
+{
+  "video": "./assets/video/88022__10040302.h264",
+  "background": "./assets/previews/88022__preview_4.png",
+  "positions": {
+    "cpu": 30,
+    "gpu": 335,
+    "ram_fan": 645
+  },
+  "fan_max": {
+    "cpu": 2057,
+    "gpu": 2330
+  },
+  "colors": {
+    "cpu_ring": {
+      "background": "#ffffff",
+      "border": "#331933",
+      "separator": "transparent",
+      "fill": "cyan_magenta"
+    },
+    "gpu_ring": {
+      "background": "#ffffff",
+      "border": "#331933",
+      "separator": "transparent",
+      "fill": "cyan_magenta"
+    },
+    "ram_ring": {
+      "background": "#ffffff",
+      "border": "#331933",
+      "separator": "transparent",
+      "fill": "cyan_magenta"
+    },
+    "cpu_temp": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "cyan_magenta"
+    },
+    "gpu_temp": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "cyan_magenta"
+    },
+    "cpu_clock": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "#ff00fe"
+    },
+    "gpu_clock": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "#ff00fe"
+    },
+    "cpu_fan": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "cyan_magenta"
+    },
+    "gpu_fan": {
+      "background": "transparent",
+      "border": "#ffffff",
+      "separator": "transparent",
+      "style": "segmented",
+      "fill": "cyan_magenta"
+    },
+    "text": {
+      "title": "#ffffff",
+      "data": "#ffffff"
+    }
+
+  }
+}
